@@ -1,21 +1,25 @@
-import Fastify from "fastify"
+import Fastify, { FastifyReply, FastifyRequest, RouteGenericInterface } from "fastify"
 import { TypeBoxTypeProvider } from "@fastify/type-provider-typebox"
 import cors from "@fastify/cors"
 import cookie from "@fastify/cookie"
 import { drizzle } from "drizzle-orm/node-postgres"
 import { eq } from "drizzle-orm"
-import { Type } from "typebox"
+import { Type, Static } from "typebox"
 import argon2 from "argon2"
 import { createHash, randomBytes } from "node:crypto"
 
-import { user } from "./schema/Users"
-import { session } from "./schema/Sessions"
+import { user } from "./schema/users"
+import { session } from "./schema/sessions"
+import { creatures } from "./schema/creatures"
+import { userCreatures } from "./schema/user-creatures"
 
 import "dotenv/config"
 
 const App = Fastify({ logger: true }).withTypeProvider<TypeBoxTypeProvider>();
 App.register(cors, { origin: 'http://localhost:5173', methods: [ 'POST', 'GET' ], credentials: true });
 App.register(cookie);
+
+App.decorateRequest('user', null);
 
 const Database = drizzle({
     connection: {
@@ -24,11 +28,123 @@ const Database = drizzle({
     }
 });
 
-/* Routes */
+// Utility
+// <-- Utility Starts Here -->
+
+const Type_Error = Type.Object(
+    {
+        error: Type.Object(
+            {
+                code: Type.String(),
+                message: Type.String()
+            }
+        )
+    }
+);
+
+interface AutheitcateOptions extends RouteGenericInterface {
+    Reply: {
+        200: any,
+        201: any,
+        400: Static<typeof Type_Error>
+        401: Static<typeof Type_Error>,
+        404: Static<typeof Type_Error>,
+        500: Static<typeof Type_Error>
+    }
+};
+
+async function Authenticate(Request: FastifyRequest<AutheitcateOptions>, Reply: FastifyReply<AutheitcateOptions>) {
+    if (!Request.cookies['session'])
+            return Reply
+                .code(401)
+                .send(
+                    {
+                        error: {
+                            code: 'AUTHENTICATION_REQUIRED',
+                            message: 'Authentication of the User is required!'
+                        }
+                    }
+                );
+
+    const SessionHash = createHash("sha256").update(Request.cookies['session']).digest("hex");
+    const Session = (await Database
+        .select()
+        .from(session)
+        .where(eq(session.token, SessionHash)))[0];
+    
+    if (!Session)
+        return Reply
+            .code(401)
+            .send(
+                {
+                    error: {
+                        code: 'AUTHENTICATION_REQUIRED',
+                        message: 'Authentication of the User is required!'
+                    }
+                }
+            );
+
+    if (Session.expired_at <= (new Date())) {
+        await Database
+            .delete(session)
+            .where(eq(session.id, Session.id));
+        
+        Reply.clearCookie('session');
+
+        return Reply
+            .code(401)
+            .send(
+                {
+                    error: {
+                        code: 'SESSION_EXPIRED',
+                        message: 'Authentication of the User is required!'
+                    }
+                }
+            )
+    }
+
+    const [User] = await Database
+        .select(
+            {
+                id: user.id,
+                username: user.username,
+                display_name: user.display_name
+            }
+        )
+        .from(user)
+        .where(eq(user.id, Session.userId));
+
+    if (!User) {
+        await Database
+            .delete(session)
+            .where(eq(session.id, Session.id));
+        
+        Reply.clearCookie('session');
+        
+        return Reply
+            .code(401)
+            .send(
+                {
+                    error: {
+                        code: 'AUTHENTICATION_REQUIRED',
+                        message: 'Authentication of the User is required!'
+                    }
+                }
+            );
+    }
+
+    Request.user = User;
+    return;
+}
+
+// <-- Utility Ends Here -->
+
+// Routes
+// <-- Routes Start Here -->
 
 App.get(
     '/',
-    (Response, Reply) => {
+    (Request, Reply) => {
         Reply.send(
             {
                 Status: 'ExplorerManiac API Ready!'
@@ -36,6 +152,8 @@ App.get(
         );
     }
 );
+
+// USER
 
 App.post(
     '/users/register',
@@ -49,21 +167,25 @@ App.post(
                 }
             ),
             response: {
-                200: Type.Object(
+                201: Type.Object(
                     {
-                        Success: Type.Boolean(),
-                        Status: Type.String(),
-                        Error: Type.Optional(Type.String())
+                        data: Type.Object(
+                            {
+                                id: Type.String()
+                            }
+                        )
                     }
-                )
+                ),
+                400: Type_Error,
+                500: Type_Error
             }
         }
     },
-    async (Response, Reply) => {
-        const { username, display_name, password } = Response.body;
+    async (Request, Reply) => {
+        const { username, display_name, password } = Request.body;
         
         try {
-            await Database
+            const [User] = await Database
                 .insert(user)
                 .values(
                     {
@@ -71,13 +193,25 @@ App.post(
                         display_name: display_name,
                         password_hash: await argon2.hash(password)
                     }
+                )
+                .returning(
+                    {
+                        id: user.id
+                    }
                 );
 
-            return Reply.send({ Success: true, Status: 'UserCreationTrue' });
+            return Reply.code(201).send({ data: User });
         }
         catch (Error: any) {
-            console.error(Error);
-            return Reply.send({ Success: false, Status: 'UserCreationFalse', Error: Error });
+            Request.log.error(Error);
+            Reply.code(500).send(
+                {
+                    error: {
+                        code: 'REGISTRATION_FAILED',
+                        message: 'Unable to Create Account!'
+                    }
+                }
+            )
         }
     }
 );
@@ -95,24 +229,45 @@ App.post(
             response: {
                 200: Type.Object(
                     {
-                        Success: Type.Boolean(),
-                        Status: Type.String()
+                        authenticated: Type.Boolean()
                     }
-                )
+                ),
+                401: Type_Error,
+                500: Type_Error
             }
         }
     },
-    async (Response, Reply) => {
-        const { username, password } = Response.body;
+    async (Request, Reply) => {
+        const { username, password } = Request.body;
         
         const Credentials = (await Database
             .select()
             .from(user)
             .where(eq(user.username, username)))[0];
             
-        if (!Credentials) return Reply.send({ Success: false, Status: 'IncorrectCredentials' });
+        if (!Credentials) 
+            return Reply
+                .code(401)
+                .send(
+                    {
+                        error: {
+                            code: 'INVALID_CREDENTIALS',
+                            message: 'Invalid Username or Password Credentials provided!'
+                        }
+                    }
+                );
         
-        if (!(await argon2.verify(Credentials.password_hash, password))) return Reply.send({ Success: false, Status: 'IncorrectCredentials' });
+        if (!(await argon2.verify(Credentials.password_hash, password))) 
+            return Reply
+                .code(401)
+                .send(
+                    {
+                        error: {
+                            code: 'INVALID_CREDENTIALS',
+                            message: 'Invalid Username or Password Credentials provided!'
+                        }
+                    }
+                );
                 
         const SessionToken = randomBytes(32).toString("hex");
 
@@ -138,7 +293,7 @@ App.post(
             }
         );
 
-        return Reply.send({ Success: true, Status: 'UserLogInTrue' });
+        return Reply.code(200).send({ authenticated: true });
     }
 );
 
@@ -146,39 +301,357 @@ App.get(
     '/users/me',
     {
         schema: {
+            response: {
+                200: Type.Object(
+                    {
+                        data: Type.Object(
+                            {
+                                id: Type.String(),
+                                username: Type.String(),
+                                display_name: Type.String()
+                            }
+                        )
+                    }
+                ), 
+                401: Type_Error,
+                500: Type_Error
+            }
+        },
+        preHandler: Authenticate
+    },
+    async (Request, Reply) => {
+        const User = Request.user!;
+        return Reply.code(200).send({ data: User });
+    }
+);
+
+App.post(
+    '/users/logout',
+    {
+        schema: {            
+            response: {
+                204: Type.Null()
+            }
         }
     },
-    async (Response, Reply) => {
-        if (!Response.cookies['session']) return Reply.send({ Success: false, Status: 'UndefinedSession' });
+    async (Request, Reply) => {
+        if (Request.cookies['session']) {
+            const SessionHash = createHash("sha256").update(Request.cookies['session']).digest("hex");
 
-        const SessionHash = createHash("sha256").update(Response.cookies['session']).digest("hex");
-        const Session = (await Database
-            .select()
-            .from(session)
-            .where(eq(session.token, SessionHash)))[0];
-        
-        if (!Session) return Reply.send({ Success: false, Status: 'UndefinedSession' });
+            await Database
+                .delete(session)
+                .where(eq(session.token, SessionHash));
+        }
 
-        const User = (await Database
-            .select(
+        Reply.clearCookie('session');
+
+        return Reply.code(204).send(null);
+    }
+);
+
+// CREATURES
+
+App.get(
+    '/creatures/:id',
+    {
+        schema: {
+            params: Type.Object(
                 {
-                    id: user.id,
-                    username: user.username,
-                    display_name: user.display_name
+                    id: Type.Integer()
                 }
-            )
-            .from(user)
-        )[0];
+            ),
+            response: {
+                200: Type.Object(
+                    {
+                        data: Type.Object(
+                            {
+                                id: Type.Integer(),
+                                name: Type.String(),
+                                description: Type.String(),
+                                rarity: Type.Enum([ 'common', 'uncommon', 'rare', 'legendary', 'epic' ])
+                            }
+                        )
+                    }
+                ),
+                404: Type_Error
+            }
+        }
+    },
+    async (Request, Reply) => {
+        const { id } = Request.params;
 
-        return Reply.send({ Success: true, Status: 'SessionTrue', User: User });
+        const [Creature] = await Database
+            .select()
+            .from(creatures)
+            .where(eq(creatures.id, id));
+
+        if (!Creature)
+            return Reply
+                .code(404)
+                .send(
+                    {
+                        error: {
+                            code: 'CREATURE_NOT_FOUND',
+                            message: 'The requested Creature was not found!'
+                        }
+                    }
+                );
+
+        return Reply.code(200).send({ data: Creature });
     }
 );
 
 App.get(
-    '/users/logout',
-    {},
-    (Response, Reply) => {}
+    '/creatures',
+    {
+        schema: {
+            response: {
+                200: Type.Object(
+                    {
+                        data: Type.Array(
+                            Type.Object(
+                                {
+                                    id: Type.Integer(),
+                                    name: Type.String(),
+                                    description: Type.String(),
+                                    rarity: Type.Enum([ 'common', 'uncommon', 'rare', 'legendary', 'epic' ])
+                                }
+                            )
+                        )
+                    }
+                )
+            }
+        }
+    },
+    async (Request, Reply) => {
+        return Reply
+            .code(200)
+            .send(
+                {
+                    data: await Database
+                        .select()
+                        .from(creatures)
+                }
+            );
+    }
 );
+
+App.post(
+    '/creatures',
+    {
+        schema: {
+            body: Type.Object(
+                {
+                    name: Type.String({ maxLength: 30 }),
+                    description: Type.String(),
+                    rarity: Type.Enum([ 'common', 'uncommon', 'rare', 'legendary', 'epic' ])
+                }
+            ),
+            response: {
+                201: Type.Object(
+                    {
+                        data: Type.Object(
+                            {
+                                id: Type.Integer(),
+                                name: Type.String(),
+                                description: Type.String(),
+                                rarity: Type.Enum([ 'common', 'uncommon', 'rare', 'legendary', 'epic' ])
+                            }
+                        )
+                    }
+                ),
+                400: Type_Error,
+                500: Type_Error
+            }
+        }
+    },
+    async (Request, Reply) => {
+        const { name, description, rarity } = Request.body;
+
+        try {
+            const [Creature] = await Database
+                .insert(creatures)
+                .values(
+                    {
+                        name: name,
+                        description: description,
+                        rarity: rarity
+                    }
+                )
+                .returning();
+            return Reply.code(201).send({ data: Creature });
+        }
+        catch (Error: any) {
+            Request.log.error(Error);
+            return Reply
+                .code(500)
+                .send(
+                    {
+                        error: {
+                            code: 'CREATURE_CREATION_FAILED',
+                            message: 'The specified Creature could not be created!'
+                        }
+                    }
+                );
+        }
+    }
+);
+
+App.get(
+    '/users/me/creatures',
+    {
+        schema: {
+            response: {
+                200: Type.Object(
+                    {
+                        data: {
+                            creatures: Type.Array(Type.Object(
+                                {
+                                    creature: Type.Object(
+                                        {
+                                            id: Type.Integer(),
+                                            name: Type.String(),
+                                            description: Type.String(),
+                                            rarity: Type.Enum([ 'common', 'uncommon', 'rare', 'legendary', 'epic' ])
+                                        }
+                                    ),
+                                    nickname: Type.Union([Type.String(), Type.Null()]),
+                                    experience: Type.Integer(),
+                                    caught_at: Type.String({ format: 'date-time' })
+                                }
+                            ))
+                        }
+                    }
+                ),
+                400: Type_Error,
+                500: Type_Error
+            }
+        },
+        preHandler: Authenticate
+    },
+    async (Request, Reply) => {
+        const User = Request.user!;
+
+        const Creatures = await Database
+            .select(
+                {
+                    creature: {
+                        id: creatures.id,
+                        name: creatures.name,
+                        description: creatures.description,
+                        rarity: creatures.rarity
+                    },
+                    nickname: userCreatures.nickname,
+                    experience: userCreatures.experience,
+                    caught_at: userCreatures.caught_at
+                }
+            )
+            .from(userCreatures)
+            .where(eq(userCreatures.userId, User.id))
+            .innerJoin(creatures, eq(userCreatures.creatureId, creatures.id));
+        
+        return Reply.code(200).send({ data: { creatures: Creatures } })
+    }
+);
+
+App.post(
+    '/users/me/creatures',
+    {
+        schema: {
+            body: Type.Object(
+                {
+                    creatureId: Type.Integer(),
+                    nickname: Type.Optional(Type.String({ maxLength: 30 }))
+                }
+            ),
+            response: {
+                201: Type.Object(
+                    {  
+                        data: Type.Object(
+                            {
+                                user: Type.Object(
+                                    {
+                                        id: Type.String(),
+                                        username: Type.String(),
+                                        display_name: Type.String()
+                                    }
+                                ),
+                                creature: Type.Object(
+                                    {
+                                        creatureId: Type.Integer(),
+                                        nickname: Type.Union([Type.String(), Type.Null()]),
+                                        experience: Type.Integer(),
+                                        caught_at: Type.Any()
+                                    }
+                                )
+                            }
+                        )
+                    }
+                ),
+                400: Type_Error,
+                404: Type_Error,
+                500: Type_Error
+            }
+        },
+        preHandler: Authenticate
+    },
+    async (Request, Reply) => {
+        const User = Request.user!;
+        const { creatureId, nickname } = Request.body;
+
+        const [Creature] = await Database
+            .select()
+            .from(creatures)
+            .where(eq(creatures.id, creatureId));
+        
+        if (!Creature)
+            return Reply
+                .code(404)
+                .send(
+                    {
+                        error: {
+                            code: 'CREATURE_NOT_FOUND',
+                            message: 'The specified Creature was not found!'
+                        }
+                    }
+                )
+
+        try {
+            const [UserCreature] = await Database
+                .insert(userCreatures)
+                .values(
+                    {
+                        userId: User.id,
+                        creatureId: creatureId,
+                        nickname: nickname
+                    }
+                )
+                .returning(
+                    {
+                        creatureId: userCreatures.creatureId,
+                        nickname: userCreatures.nickname,
+                        experience: userCreatures.experience,
+                        caught_at: userCreatures.caught_at
+                    }
+                );
+            return Reply.code(201).send({ data: { user: User, creature: UserCreature } });
+        }
+        catch (Error: any) {
+            Request.log.error(Error);
+            return Reply
+                .code(500)
+                .send(
+                    {
+                        error: {
+                            code: 'CREATURE_DISCOVERY_FAILED',
+                            message: 'The specified Creature could not be discovered!'
+                        }
+                    }
+                )
+        }
+    }
+);
+
 
 App.listen({ port: 3000 }, (Error, Address) => {
     if (Error) {

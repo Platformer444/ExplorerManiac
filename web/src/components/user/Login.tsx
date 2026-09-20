@@ -24,7 +24,7 @@ function Login() {
                 (Data) => {
                     return Data.json().then(
                         (Response) => {
-                            if (!Response.Success) throw new Error(Response.Status);
+                            if (!Data.ok) throw new Error(Response.Status);
                             return Response;
                         }
                     )

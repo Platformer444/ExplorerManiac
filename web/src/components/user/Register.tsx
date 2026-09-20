@@ -1,8 +1,4 @@
-import { useState } from "react"
-
 function Register() {
-    const [Submit, setSubmit] = useState<boolean>(true);
-
     const Register = async (Event: any) => {
         Event.preventDefault();
         
@@ -28,7 +24,7 @@ function Register() {
                 (Data) => {
                     return Data.json().then(
                         (Response) => {
-                            if (!Response.Success) throw new Error(Response.Error || 'Error');
+                            if (!Data.ok) throw new Error(Response.Error || 'Error');
                             return Response;
                         }
                     );
@@ -38,8 +34,7 @@ function Register() {
                 (Error) => {
                     console.error(Error);
                 }
-            )
-            .finally(() => setSubmit(false))
+            );
     };
 
     return (
@@ -49,7 +44,7 @@ function Register() {
                 <input name="display_name"></input> <br />
                 <input name="password" type="password"></input> <br />
                 <input name="confirm-password" type="password"></input> <br />
-                <button type="submit" disabled={!Submit}>{ Submit ? 'Submit' : 'Submitting...' }</button> <br />
+                <button type="submit">Submit</button> <br />
             </form>
         </div>
     );

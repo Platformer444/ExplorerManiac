@@ -5,7 +5,7 @@ import Login from "./components/user/Login";
 
 import './App.css'
 
-async function App() {
+function App() {
     return (
         <>
             <Routes>
