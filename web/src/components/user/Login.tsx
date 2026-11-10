@@ -1,4 +1,7 @@
+import { useNavigate } from "react-router";
+
 function Login() {
+    const Navigate = useNavigate();
     const Login = async (Event: any) => {
         Event.preventDefault();
 
@@ -24,10 +27,15 @@ function Login() {
                 (Data) => {
                     return Data.json().then(
                         (Response) => {
-                            if (!Data.ok) throw new Error(Response.Status);
+                            if (!Data.ok) throw new Error(Response.error.message || "Error");
                             return Response;
                         }
                     )
+                }
+            )
+            .then(
+                (Response) => {
+                    Navigate('../');
                 }
             )
             .catch(

@@ -108,7 +108,8 @@ async function Authenticate(Request: FastifyRequest<AutheitcateOptions>, Reply: 
             {
                 id: user.id,
                 username: user.username,
-                display_name: user.display_name
+                display_name: user.display_name,
+                created_at: user.created_at
             }
         )
         .from(user)
@@ -308,7 +309,8 @@ App.get(
                             {
                                 id: Type.String(),
                                 username: Type.String(),
-                                display_name: Type.String()
+                                display_name: Type.String(),
+                                created_at: Type.Any()
                             }
                         )
                     }
@@ -346,6 +348,74 @@ App.post(
         Reply.clearCookie('session');
 
         return Reply.code(204).send(null);
+    }
+);
+
+App.post(
+    '/users/edit',
+    {
+        schema: {
+            body: Type.Object(
+                {
+                    username: Type.String({ maxLength: 30 }),
+                    display_name: Type.String({ maxLength: 30 })
+                }
+            ),
+            response: {
+                201: Type.Object(
+                    {
+                        data: Type.Object(
+                            {
+                                id: Type.String(),
+                                username: Type.String(),
+                                display_name: Type.String(),
+                                created_at: Type.Any()
+                            }
+                        )
+                    }
+                ),
+                401: Type_Error,
+                500: Type_Error
+            }
+        },
+        preHandler: Authenticate
+    },
+    async (Request, Reply) => {
+        const User = Request.user!;
+        const { username, display_name } = Request.body;
+
+        try {
+            const [UpdatedUser] = await Database
+                .update(user)
+                .set(
+                    {
+                        username: username,
+                        display_name: display_name
+                    }
+                )
+                .where(eq(user.id, User.id))
+                .returning(
+                    {
+                        id: user.id,
+                        username: user.username,
+                        display_name: user.display_name,
+                        created_at: user.created_at
+                    }
+                );
+            
+            return Reply.code(201).send({ data: UpdatedUser });
+        }
+        catch (Error) {
+            Request.log.error(Error);
+            Reply.code(500).send(
+                {
+                    error: {
+                        code: 'EDITING_FAILED',
+                        message: 'Unable to Edit Account!'
+                    }
+                }
+            );
+        }
     }
 );
 
@@ -517,7 +587,7 @@ App.get(
                                     ),
                                     nickname: Type.Union([Type.String(), Type.Null()]),
                                     experience: Type.Integer(),
-                                    caught_at: Type.String({ format: 'date-time' })
+                                    caught_at: Type.Any()
                                 }
                             ))
                         }

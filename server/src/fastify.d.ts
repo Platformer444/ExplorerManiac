@@ -5,7 +5,8 @@ declare module 'fastify' {
         user: {
             id: string,
             username: string,
-            display_name: string
+            display_name: string,
+            created_at: Date
         } | null
     }
 }

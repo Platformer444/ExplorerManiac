@@ -24,7 +24,7 @@ function Register() {
                 (Data) => {
                     return Data.json().then(
                         (Response) => {
-                            if (!Data.ok) throw new Error(Response.Error || 'Error');
+                            if (!Data.ok) throw new Error(Response.error.message || 'Error');
                             return Response;
                         }
                     );
